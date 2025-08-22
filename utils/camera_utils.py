@@ -81,6 +81,31 @@ class Camera(nn.Module):
             dataset.width,
             device=dataset.device,
         )
+    
+    @staticmethod
+    def init_from_dataset_down(dataset, idx, projection_matrix, pyr_level_num):
+        gt_colors, gt_depths, gt_pose = dataset.get_pyritem(idx, pyr_level_num)
+        Cameras = []
+        for level in range(pyr_level_num):
+            Cameras.append(
+                Camera(
+                    idx,
+                    gt_colors[level],
+                    gt_depths[level],
+                    gt_pose,
+                    projection_matrix,
+                    dataset.fx,
+                    dataset.fy,
+                    dataset.cx,
+                    dataset.cy,
+                    dataset.fovx,
+                    dataset.fovy,
+                    dataset.height,
+                    dataset.width,
+                    device=dataset.device,
+                )
+            )
+        return Cameras
 
     @staticmethod
     def init_from_gui(uid, T, FoVx, FoVy, fx, fy, cx, cy, H, W):

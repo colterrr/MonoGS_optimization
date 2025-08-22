@@ -12,6 +12,9 @@ from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
 
+import cv2
+import  numpy as np
+from utils.camera_utils import Camera
 
 class BackEnd(mp.Process):
     def __init__(self, config):
@@ -37,6 +40,68 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+
+        self.pyramid_level = config["Pyramid_setting"]["pyramid_level"]
+        self.down_cameras = [{} for _ in range(self.pyramid_level)]
+        self.down_depths = [{} for _ in range(self.pyramid_level)]
+
+    def downsample_camera(self, cam: Camera, s=0.5):
+        fx_p = cam.fx * s
+        fy_p = cam.fy * s
+        cx_p = cam.cx * s
+        cy_p = cam.cy * s
+        width_p  = int(round(cam.image_width * s))
+        height_p = int(round(cam.image_height * s))
+
+        # 如果你保留 fovx/fovy，不用改；也可用新内参重算以确保一致
+        fovx_p = cam.FoVx  # 或者：2 * math.atan(width_p / (2.0 * fx_p))
+        fovy_p = cam.FoVy  # 或者：2 * math.atan(height_p / (2.0 * fy_p))
+
+        # 投影矩阵缩放（若有）
+        # S = np.diag([s, s, 1.0])
+        # P_p = S @ cam.projection_matrix
+
+        # pyramid image 下采样
+        down_img = cam.original_image
+        if torch.is_tensor(down_img):
+            # 如果在 GPU 上，要先转 CPU
+            down_img = down_img.detach().cpu().permute(1, 2, 0).numpy()
+            # # 如果是 0~255 uint8 ，可选地转成float 类型(0~1)
+            # if down_img.dtype == np.uint8:
+            #     down_img = down_img.astype(np.float32) / 255.0
+            # 如果是 CHW 格式，转成 HWC
+            if down_img.ndim == 3 and down_img.shape[0] in (1,3):
+                down_img = np.transpose(down_img, (1, 2, 0))        
+        down_img = cv2.pyrDown(down_img)
+        down_img = (
+                torch.from_numpy(down_img)
+                .clamp(0.0, 1.0)
+                .permute(2, 0, 1)
+                .to(device=self.device, dtype=self.dtype)
+            )
+
+        # depth 下采样
+        if cam.depth is not None and cam.depth.size > 0:
+            down_depth = cam.depth
+            down_depth = cv2.pyrDown(down_depth)
+        else:
+            down_depth = None
+
+        pose_gt = torch.eye(4, device=cam.device)  # 先做单位矩阵
+        pose_gt[:3, :3] = cam.R_gt                      # 左上角放旋转
+        pose_gt[:3, 3] = cam.T_gt    
+
+        return Camera(
+            cam.uid,
+            down_img,   # 你的下采样彩色图
+            down_depth,   # 你的下采样深度（见下方备注）
+            pose_gt,            # 位姿不变
+            cam.projection_matrix,  # 若你在 Camera 里是用 K,R,t 现算P，可不改；如果存的是P，改成 S@P
+            fx_p, fy_p, cx_p, cy_p,
+            fovx_p, fovy_p,
+            height_p, width_p,
+            device=cam.device,
+        )
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -400,6 +465,19 @@ class BackEnd(mp.Process):
                     self.reset()
 
                     self.viewpoints[cur_frame_idx] = viewpoint
+
+                    #create downsample camera
+                    Camera_now = viewpoint     
+                    depth_now = depth_map          
+                    for level_idx in range(self.pyramid_level):
+                        Camera_now = self.downsample_camera(Camera_now)
+                        depth_now = cv2.pyrDown(depth_now)
+                        self.down_cameras[level_idx][cur_frame_idx] = Camera_now
+                        self.down_depths[level_idx][cur_frame_idx] = depth_now
+                    # select downframe
+                    viewpoint = self.down_cameras[0][cur_frame_idx]
+                    depth_map = self.down_depths[0][cur_frame_idx]
+
                     self.add_next_kf(
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )
@@ -414,6 +492,19 @@ class BackEnd(mp.Process):
 
                     self.viewpoints[cur_frame_idx] = viewpoint
                     self.current_window = current_window
+
+                    #create downsample camera
+                    Camera_now = viewpoint     
+                    depth_now = depth_map          
+                    for level_idx in range(self.pyramid_level):
+                        Camera_now = self.downsample_camera(Camera_now)
+                        depth_now = cv2.pyrDown(depth_now)
+                        self.down_cameras[level_idx][cur_frame_idx] = Camera_now
+                        self.down_depths[level_idx][cur_frame_idx] = depth_now
+                    # select downframe
+                    viewpoint = self.down_cameras[0][cur_frame_idx]
+                    depth_map = self.down_depths[0][cur_frame_idx]
+
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map)
 
                     opt_params = []

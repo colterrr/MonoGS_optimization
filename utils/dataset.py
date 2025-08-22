@@ -254,6 +254,39 @@ class MonocularDataset(BaseDataset):
             },
         }
 
+    def get_pyritem(self, idx, pyr_level_num):
+        color_path = self.color_paths[idx]
+
+        # pose
+        pose = self.poses[idx]
+        pose = torch.from_numpy(pose).to(device=self.device)        
+
+        images = []
+        depths = []
+        image = np.array(Image.open(color_path))
+        depth = None
+
+        if self.disorted:
+            image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
+
+        if self.has_depth:
+            depth_path = self.depth_paths[idx]
+            depth = np.array(Image.open(depth_path)) / self.depth_scale        
+
+        for _ in pyr_level_num:
+            depths.append(depth)
+            images.append(
+                torch.from_numpy(image / 255.0)
+                .clamp(0.0, 1.0)
+                .permute(2, 0, 1)
+                .to(device=self.device, dtype=self.dtype)
+            )
+            depth = cv2.pyrDown(depth)
+            image = cv2.pyrDown(image)
+
+        return images, depths, pose
+
+
     def __getitem__(self, idx):
         color_path = self.color_paths[idx]
         pose = self.poses[idx]
